@@ -1,0 +1,48 @@
+{
+  "name": "@backstage-community/backstage-plugin-catalog-backend-module-mta-entity-provider-dynamic",
+  "description": "The mta-entity-provider backend module for the catalog plugin.",
+  "version": "0.1.1",
+  "main": "dist/index.cjs.js",
+  "types": "dist/index.d.ts",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public",
+    "main": "dist/index.cjs.js",
+    "types": "dist/index.d.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/backstage/community-plugins",
+    "directory": "workspaces/mta/plugins/catalog-backend-module-mta-entity-provider"
+  },
+  "backstage": {
+    "role": "backend-plugin-module",
+    "pluginId": "catalog",
+    "pluginPackage": "@backstage/plugin-catalog-backend"
+  },
+  "dependencies": {
+    "openid-client": "^5.6.5",
+    "winston": "^3.13.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "bundleDependencies": true,
+  "peerDependencies": {
+    "@backstage/backend-common": "^0.23.3",
+    "@backstage/backend-dynamic-feature-service": "^0.2.15",
+    "@backstage/backend-plugin-api": "^0.6.18",
+    "@backstage/catalog-model": "^1.5.0",
+    "@backstage/config": "^1.2.0",
+    "@backstage/plugin-catalog-common": "^1.0.22",
+    "@backstage/plugin-catalog-node": "^1.12.4"
+  },
+  "overrides": {
+    "@aws-sdk/util-utf8-browser": {
+      "@smithy/util-utf8": "^2.0.0"
+    }
+  },
+  "resolutions": {
+    "@aws-sdk/util-utf8-browser": "npm:@smithy/util-utf8@~2"
+  }
+}

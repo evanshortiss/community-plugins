@@ -33,179 +33,205 @@ export async function createRouter(
   const frontEndBaseURL = config.getString('app.baseUrl');
   const backstageBaseURL = config.getString('backend.baseUrl');
   const baseUrl = config.getString('mta.url');
-  const baseURLHub = `${baseUrl}/hub`;
-  const realm = config.getString('mta.providerAuth.realm');
-  const clientID = config.getString('mta.providerAuth.clientID');
-  const secret = config.getString('mta.providerAuth.secret');
-  const baseURLAuth = `${baseUrl}/auth/realms/${realm}`;
-  const mtaAuthIssuer = await Issuer.discover(baseURLAuth);
-  const authClient = new mtaAuthIssuer.Client({
-    client_id: clientID,
-    client_secret: secret,
-    response_types: ['code'],
-  });
-  const code_verifier = generators.codeVerifier();
-  const code_challenge = generators.codeChallenge(code_verifier);
+  // const baseURLHub = `${baseUrl}/hub`;
+  const realm = config.getOptionalString('mta.providerAuth.realm');
+  const clientID = config.getOptionalString('mta.providerAuth.clientID');
+  const secret = config.getOptionalString('mta.providerAuth.secret');
 
   const router = Router();
   router.use(express.json());
 
-  router.get('/cb/*', async (request, response) => {
-    logger.info('PONG!');
-    const user = (request.params as { [key: string]: string })[0] as string;
-    logger.info(`user in callback: ${user}`);
-    const continueTo = request.query.continueTo;
-    const u = new URL(`${backstageBaseURL}/api/mta/cb/${user}`);
-    if (continueTo) {
-      u.searchParams.set('continueTo', continueTo.toString());
-    }
-    logger.info(`in callback: ${u.toString()}`);
-    const params = authClient.callbackParams(request);
-    const tokenSet = await authClient.callback(u.toString(), params, {
-      code_verifier,
-    });
-    if (!tokenSet.access_token || !tokenSet.refresh_token) {
-      response.status(401);
-      response.json({});
-      return;
-    }
-    cacheClient.set(user, tokenSet.access_token, {
-      ttl: tokenSet.expires_in ?? 60 * 1000,
-    });
-    entityApplicationStorage.saveRefreshTokenForUser(
-      user,
-      tokenSet.refresh_token,
-    );
-    response.redirect(continueTo?.toString() ?? frontEndBaseURL);
-  });
+  type DisallowSlash<T extends string> = T extends `/${string}` ? never : T;
+  function fetchFromMTA<T extends string>(
+    path: DisallowSlash<T>,
+    reqOpts: RequestInit,
+    accessToken?: string,
+  ) {
+    const u = new URL(`/hub/${path}`, baseUrl);
 
-  router.use(async (request, response, next) => {
-    logger.info(`path: ${request.path}`);
-    if (request.path.includes('/cb') || request.path.includes('/health')) {
-      console.log('includes cb then next');
-      next();
-      return;
+    if (accessToken) {
+      // Extend request options with authorization headers
+      reqOpts.credentials = 'include';
+      reqOpts.headers = {
+        Authorization: `Bearer ${accessToken}`,
+        ...reqOpts.headers,
+      };
     }
-    const backstageID = await identity.getIdentity({ request });
-    logger.info(
-      `backstageID id for userEntityRef: ${backstageID?.identity.userEntityRef}`,
+
+    return fetch(u.toString(), options);
+  }
+
+  if (realm && clientID && secret) {
+    logger.warn(
+      'mta.providerAuth.realm, mta.providerAuth.clientID, and mta.providerAuth.secret must be set to enable authenticated requests',
     );
-    logger.info({
-      backstageBaseURL,
-      frontEndBaseURL,
-      requestHeaders: request.headers,
-      referer: request.headers.referer,
+    const baseURLAuth = `${baseUrl}/auth/realms/${realm}`;
+    const mtaAuthIssuer = await Issuer.discover(baseURLAuth);
+
+    const authClient = new mtaAuthIssuer.Client({
+      client_id: clientID,
+      client_secret: secret,
+      response_types: ['code'],
     });
-    const id = backstageID?.identity.userEntityRef ?? 'undefined';
-    const u = new URL(`${backstageBaseURL}/api/mta/cb/${id}`);
-    const org = request.headers.referer;
-    logger.info(`here2: ${org}`);
-    u.searchParams.set(
-      'continueTo',
-      request.headers.referer ?? frontEndBaseURL,
-    );
-    logger.info(`here: ${u.toString()}`);
-    let accessToken = await cacheClient.get(String(id));
+    const code_verifier = generators.codeVerifier();
+    const code_challenge = generators.codeChallenge(code_verifier);
 
-    const refreshToken = await entityApplicationStorage.getRefreshTokenForUser(
-      String(id),
-    );
-
-    if (refreshToken) {
-      const expired = isTokenExpired(refreshToken.toString());
-      if (expired) {
-        console.log('Refresh token has expired. Redirecting to login.');
-        const authorizationURL = authClient.authorizationUrl({
-          redirect_uri: u.toString(),
-          code_challenge,
-          code_challenge_method: 'S256',
-        });
-        response.statusCode = 401;
-        response.json({ loginURL: authorizationURL });
-        return;
+    router.get('/cb/*', async (request, response) => {
+      logger.info('PONG!');
+      const user = (request.params as { [key: string]: string })[0] as string;
+      logger.info(`user in callback: ${user}`);
+      const continueTo = request.query.continueTo;
+      const u = new URL(`${backstageBaseURL}/api/mta/cb/${user}`);
+      if (continueTo) {
+        u.searchParams.set('continueTo', continueTo.toString());
       }
-    }
-
-    console.log({
-      backstageBaseURL,
-      frontEndBaseURL,
-      requestHeaders: request.headers,
-      referer: request.headers.referer,
-      accessToken,
-      refreshToken,
-      u: u.toString(),
-      id,
-    });
-    if (!accessToken && !refreshToken) {
-      console.log('u.toString', u.toString());
-      console.log('u redirect uri!', u);
-      const authorizationURL = authClient.authorizationUrl({
-        redirect_uri: u.toString(),
-        // redirect_uri: 'http://localhost:7007/api/mta/cb/user:development/guest',
-        code_challenge,
-        code_challenge_method: 'S256',
+      logger.info(`in callback: ${u.toString()}`);
+      const params = authClient.callbackParams(request);
+      const tokenSet = await authClient.callback(u.toString(), params, {
+        code_verifier,
       });
-      response.statusCode = 401;
-      logger.info(`no token found`, { authorizationURL });
-      response.json({ loginURL: authorizationURL });
-      return;
-    }
-    if (!accessToken && refreshToken) {
-      const tokenSet = await authClient.refresh(String(refreshToken));
-      if (!tokenSet || !tokenSet.access_token) {
-        const authorizationURL = authClient.authorizationUrl({
-          redirect_uri: u.toString(),
-          code_challenge,
-          code_challenge_method: 'S256',
-        });
-        response.statusCode = 401;
-        response.json({ loginURL: authorizationURL });
+      if (!tokenSet.access_token || !tokenSet.refresh_token) {
+        response.status(401);
+        response.json({});
         return;
       }
-      logger.info(`refreshed token`);
-      accessToken = String(tokenSet.access_token);
-      cacheClient.set(String(id), String(tokenSet.access_token), {
+      cacheClient.set(user, tokenSet.access_token, {
         ttl: tokenSet.expires_in ?? 60 * 1000,
       });
-      if (tokenSet.refresh_token && tokenSet.refresh_token !== refreshToken) {
-        entityApplicationStorage.saveRefreshTokenForUser(
-          String(id),
-          tokenSet.refresh_token,
-        );
-      }
-    }
-    response.locals.accessToken = accessToken;
-    next();
-  });
+      entityApplicationStorage.saveRefreshTokenForUser(
+        user,
+        tokenSet.refresh_token,
+      );
+      response.redirect(continueTo?.toString() ?? frontEndBaseURL);
+    });
 
-  router.get('/cb/:username', async (request, response) => {
-    logger.info('PONG!');
-    const user = request.params.username;
-    logger.info(`user in callback: ${user}`);
-    const continueTo = request.query.continueTo;
-    const u = new URL(`${backstageBaseURL}/api/mta/cb/${user}`);
-    if (continueTo) {
-      u.searchParams.set('continueTo', continueTo.toString());
-    }
-    logger.info(`in callback: ${u.toString()}`);
-    const params = authClient.callbackParams(request);
-    const tokenSet = await authClient.callback(u.toString(), params, {
-      code_verifier,
+    router.use(async (request, response, next) => {
+      logger.info(`path: ${request.path}`);
+      if (request.path.includes('/cb') || request.path.includes('/health')) {
+        console.log('includes cb then next');
+        next();
+        return;
+      }
+      const backstageID = await identity.getIdentity({ request });
+      logger.info(
+        `backstageID id for userEntityRef: ${backstageID?.identity.userEntityRef}`,
+      );
+      logger.info({
+        backstageBaseURL,
+        frontEndBaseURL,
+        requestHeaders: request.headers,
+        referer: request.headers.referer,
+      });
+      const id = backstageID?.identity.userEntityRef ?? 'undefined';
+      const u = new URL(`${backstageBaseURL}/api/mta/cb/${id}`);
+      const org = request.headers.referer;
+      logger.info(`here2: ${org}`);
+      u.searchParams.set(
+        'continueTo',
+        request.headers.referer ?? frontEndBaseURL,
+      );
+      logger.info(`here: ${u.toString()}`);
+      let accessToken = await cacheClient.get(String(id));
+
+      const refreshToken =
+        await entityApplicationStorage.getRefreshTokenForUser(String(id));
+
+      if (refreshToken) {
+        const expired = isTokenExpired(refreshToken.toString());
+        if (expired) {
+          console.log('Refresh token has expired. Redirecting to login.');
+          const authorizationURL = authClient.authorizationUrl({
+            redirect_uri: u.toString(),
+            code_challenge,
+            code_challenge_method: 'S256',
+          });
+          response.statusCode = 401;
+          response.json({ loginURL: authorizationURL });
+          return;
+        }
+      }
+
+      console.log({
+        backstageBaseURL,
+        frontEndBaseURL,
+        requestHeaders: request.headers,
+        referer: request.headers.referer,
+        accessToken,
+        refreshToken,
+        u: u.toString(),
+        id,
+      });
+      if (!accessToken && !refreshToken) {
+        console.log('u.toString', u.toString());
+        console.log('u redirect uri!', u);
+        const authorizationURL = authClient.authorizationUrl({
+          redirect_uri: u.toString(),
+          // redirect_uri: 'http://localhost:7007/api/mta/cb/user:development/guest',
+          code_challenge,
+          code_challenge_method: 'S256',
+        });
+        response.statusCode = 401;
+        logger.info(`no token found`, { authorizationURL });
+        response.json({ loginURL: authorizationURL });
+        return;
+      }
+      if (!accessToken && refreshToken) {
+        const tokenSet = await authClient.refresh(String(refreshToken));
+        if (!tokenSet || !tokenSet.access_token) {
+          const authorizationURL = authClient.authorizationUrl({
+            redirect_uri: u.toString(),
+            code_challenge,
+            code_challenge_method: 'S256',
+          });
+          response.statusCode = 401;
+          response.json({ loginURL: authorizationURL });
+          return;
+        }
+        logger.info(`refreshed token`);
+        accessToken = String(tokenSet.access_token);
+        cacheClient.set(String(id), String(tokenSet.access_token), {
+          ttl: tokenSet.expires_in ?? 60 * 1000,
+        });
+        if (tokenSet.refresh_token && tokenSet.refresh_token !== refreshToken) {
+          entityApplicationStorage.saveRefreshTokenForUser(
+            String(id),
+            tokenSet.refresh_token,
+          );
+        }
+      }
+      response.locals.accessToken = accessToken;
+      next();
     });
-    if (!tokenSet.access_token || !tokenSet.refresh_token) {
-      response.status(401);
-      response.json({});
-      return;
-    }
-    cacheClient.set(user, tokenSet.access_token, {
-      ttl: tokenSet.expires_in ?? 60 * 1000,
+
+    router.get('/cb/:username', async (request, response) => {
+      logger.info('PONG!');
+      const user = request.params.username;
+      logger.info(`user in callback: ${user}`);
+      const continueTo = request.query.continueTo;
+      const u = new URL(`${backstageBaseURL}/api/mta/cb/${user}`);
+      if (continueTo) {
+        u.searchParams.set('continueTo', continueTo.toString());
+      }
+      logger.info(`in callback: ${u.toString()}`);
+      const params = authClient.callbackParams(request);
+      const tokenSet = await authClient.callback(u.toString(), params, {
+        code_verifier,
+      });
+      if (!tokenSet.access_token || !tokenSet.refresh_token) {
+        response.status(401);
+        response.json({});
+        return;
+      }
+      cacheClient.set(user, tokenSet.access_token, {
+        ttl: tokenSet.expires_in ?? 60 * 1000,
+      });
+      entityApplicationStorage.saveRefreshTokenForUser(
+        user,
+        tokenSet.refresh_token,
+      );
+      response.redirect(continueTo?.toString() ?? frontEndBaseURL);
     });
-    entityApplicationStorage.saveRefreshTokenForUser(
-      user,
-      tokenSet.refresh_token,
-    );
-    response.redirect(continueTo?.toString() ?? frontEndBaseURL);
-  });
+  }
 
   router.get('/health', async (_, response) => {
     logger.info('PING!');
@@ -223,14 +249,13 @@ export async function createRouter(
   //     .then((response) => response.data);
 
   router.get('/tasks', async (_, response) => {
-    const getResponse = fetch(`${baseURLHub}/tasks/report/dashboard`, {
-      credentials: 'include',
-      headers: {
-        Accept: 'application/json, text/plain, */*',
-        Authorization: `Bearer ${response.locals.accessToken}`,
+    const getResponse = fetchFromMTA(
+      'tasks/report/dashboard',
+      {
+        method: 'GET',
       },
-      method: 'GET',
-    });
+      response.locals.accessToken,
+    );
 
     const status = await (await getResponse).status;
     if (status !== 200) {
@@ -244,14 +269,13 @@ export async function createRouter(
   });
 
   router.get('/targets', async (_, response) => {
-    const getResponse = fetch(`${baseURLHub}/targets`, {
-      credentials: 'include',
-      headers: {
-        Accept: 'application/json, text/plain, */*',
-        Authorization: `Bearer ${response.locals.accessToken}`,
+    const getResponse = fetchFromMTA(
+      'targets',
+      {
+        method: 'GET',
       },
-      method: 'GET',
-    });
+      response.locals.accessToken,
+    );
 
     const status = await (await getResponse).status;
     if (status !== 200) {
@@ -264,14 +288,13 @@ export async function createRouter(
   });
 
   router.get('/identities', async (_, response) => {
-    const getResponse = fetch(`${baseURLHub}/identities`, {
-      credentials: 'include',
-      headers: {
-        Accept: 'application/json, text/plain, */*',
-        Authorization: `Bearer ${response.locals.accessToken}`,
+    const getResponse = fetchFromMTA(
+      'identities',
+      {
+        method: 'GET',
       },
-      method: 'GET',
-    });
+      response.locals.accessToken,
+    );
 
     const status = await (await getResponse).status;
     if (status !== 200) {
@@ -284,14 +307,13 @@ export async function createRouter(
   });
 
   router.get('/applications', async (_, response) => {
-    const getResponse = fetch(`${baseURLHub}/applications`, {
-      credentials: 'include',
-      headers: {
-        Accept: 'application/json, text/plain, */*',
-        Authorization: `Bearer ${response.locals.accessToken}`,
+    const getResponse = fetchFromMTA(
+      'applications',
+      {
+        method: 'GET',
       },
-      method: 'GET',
-    });
+      response.locals.accessToken,
+    );
 
     const status = await (await getResponse).status;
     if (status !== 200) {
@@ -316,14 +338,13 @@ export async function createRouter(
     }
 
     // logger.info('found application: ' + applicatonID);
-    const getResponse = fetch(`${baseURLHub}/applications/${applicatonID}`, {
-      credentials: 'include',
-      headers: {
-        Accept: 'application/json, text/plain, */*',
-        Authorization: `Bearer ${response.locals.accessToken}`,
+    const getResponse = fetchFromMTA(
+      `applications/${applicatonID}`,
+      {
+        method: 'GET',
       },
-      method: 'GET',
-    });
+      response.locals.accessToken,
+    );
 
     const status = await (await getResponse).status;
     if (status !== 200) {
@@ -381,16 +402,12 @@ export async function createRouter(
   });
 
   router.get('/issues/:id', async (request, response) => {
-    const getResponse = fetch(
-      `${baseURLHub}/applications/${request.params.id}/analysis/issues`,
+    const getResponse = fetchFromMTA(
+      `applications/${request.params.id}/analysis/issues`,
       {
-        credentials: 'include',
-        headers: {
-          Accept: 'application/json, text/plain, */*',
-          Authorization: `Bearer ${response.locals.accessToken}`,
-        },
         method: 'GET',
       },
+      response.locals.accessToken,
     );
 
     const status = await (await getResponse).status;
@@ -407,19 +424,16 @@ export async function createRouter(
   router.put('/applications/:id', async (req: any, res: any) => {
     const applicationId = req.params.id;
     const accessToken = res.locals.accessToken; // Assuming accessToken is correctly set in locals
-    const url = `${baseURLHub}/applications/${applicationId}`;
 
     try {
-      const fetchResponse = await fetch(url, {
-        method: 'PUT',
-        headers: {
-          Accept: 'application/json, text/plain, */*',
-          'Content-Type': 'application/json', // Ensure you have Content-Type set for JSON body
-          Authorization: `Bearer ${accessToken}`,
+      const fetchResponse = await fetchFromMTA(
+        `applications/${applicationId}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify(req.body),
         },
-        body: JSON.stringify(req.body),
-        credentials: 'include',
-      });
+        accessToken,
+      );
 
       if (!fetchResponse.ok) {
         // Check if the HTTP response status code is 2xx
@@ -455,7 +469,6 @@ export async function createRouter(
         analysisOptions,
       );
 
-      const TASKGROUPS = `${baseURLHub}/taskgroups`;
       // Step 1: Create a task group
 
       const defaultTaskData: TaskData = {
@@ -490,14 +503,9 @@ export async function createRouter(
 
       const createTaskgroup = async (obj: Taskgroup) => {
         console.log('obj', obj);
-        const createTaskgroupResponse = await fetch(TASKGROUPS, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json, text/plain, */*',
 
-            Authorization: `Bearer ${response.locals.accessToken}`,
-          },
+        const createTaskgroupResponse = await fetchFromMTA('taskgroups', {
+          method: 'POST',
           body: JSON.stringify(obj),
         });
 
@@ -531,15 +539,10 @@ export async function createRouter(
       };
 
       const submitTaskgroup = async (obj: Taskgroup) => {
-        const submitTaskgroupResponse = await fetch(
-          `${TASKGROUPS}/${obj.id}/submit`,
+        const submitTaskgroupResponse = await fetchFromMTA(
+          `taskgroups/${obj.id}/submit`,
           {
             method: 'PUT',
-            headers: {
-              'Content-Type': 'application/json',
-              Accept: 'application/json, text/plain, */*',
-              Authorization: `Bearer ${response.locals.accessToken}`,
-            },
             body: JSON.stringify(obj),
           },
         );
