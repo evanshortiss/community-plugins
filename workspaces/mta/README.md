@@ -45,15 +45,13 @@ These plugins are designed to work in unison to provide a means to create and an
   EOF
   ```
 
-```
-
   - Obtain the URL for the tackle instance by running the following command:
 
-```
-
-oc get routes
-
-```
+  ```
+  
+  oc get routes
+  
+  ```
 
 You will need the URL for the tackle instance to configure the MTA plugin. This URL needs to be added to the app-config configmap [here](app-config-rhdh.example.yaml) under the `mta` key. Be sure to add the `http://` or `https://` prefix to the URL.
 
